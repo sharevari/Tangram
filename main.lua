@@ -466,7 +466,7 @@ function rebuild_pattern_data()
     options.length.value * options.spacing.value;
 
   for i = 1, options.length.value do
-    set_note_from_scaled_value(i, knobs[i].value / 127);
+    write_note_from_scaled_value(i, knobs[i].value / 127);
   end
 end
 
@@ -474,7 +474,7 @@ end
 --------------------------------------------------------------------------------
 
 function on_gui_knob_turned(step, value)
-  set_note_from_scaled_value(step, value / 127);
+  write_note_from_scaled_value(step, value / 127);
   
   -- todo: set light on hw knob
 end
@@ -487,7 +487,7 @@ function on_midi_knob_turned(step, message)
   if (message:is_abs_value()) then
 
     if (step <= options.length.value) then
-      set_note_from_scaled_value(step, message.int_value / 127);
+      write_note_from_scaled_value(step, message.int_value / 127);
       if (knobs[1] ~= nil) then
         knobs[step].value = message.int_value;
       end
@@ -626,7 +626,7 @@ end
 
 --------------------------------------------------------------------------------
 
-function set_note_from_scaled_value(step, value)
+function write_note_from_scaled_value(step, value)
 
   local note_min = options.note_range_min;
   local note_max = options.note_range_max;
