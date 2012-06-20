@@ -124,6 +124,38 @@ end
 
 --------------------------------------------------------------------------------
 
+function bcr_midi_out_port()
+
+  --Input:
+  --BCR2000 port 1 = messages from the BCR itself
+  --BCR2000 port 2 = messages from the BCR's MIDI IN
+  --BCR2000 port 3 = UNUSABLE DUMMY
+  --
+  --Output:
+  --BCR2000 port 1 = messages to the BCR itself
+  --BCR2000 port 2 = messages to the BCR's MIDI OUT A
+  --BCR2000 port 3 = messages to the BCR's MIDI OUT B/THRU
+
+  local bcr_out_port = nil;
+
+  local outputs = renoise.Midi.available_output_devices()
+  if not table.is_empty(outputs) then
+    for i = 1, #outputs do
+      local port_name = outputs[i];
+      if (string.find(port_name, "BCR2000") ~= nil and
+          string.find(port_name, "port 1") ~= nil) then
+        bcr_out_port = port_name;
+      end
+    end  
+  end
+
+  return bcr_out_port;
+  
+end
+
+
+--------------------------------------------------------------------------------
+
 function bcr_sysex()
 
   local inputs = renoise.Midi.available_input_devices()
@@ -222,10 +254,18 @@ end
 local vb;
 local knobs = {};
 local last_played_line;
+local midi_out = nil;
 
 --------------------------------------------------------------------------------
 
 function show_gui()
+
+  local midi_out_port = bcr_midi_out_port();
+  if (midi_out_port ~= nil) then
+    midi_out = renoise.Midi.create_output_device(midi_out_port);
+  end
+
+  rprint(midi_out);
 
   local dialog = nil
   
@@ -616,11 +656,22 @@ function on_idle()
           else
             knobs[length].active = true;
           end
+          
+          if (midi_out ~= nil) then
+            -- ch11 cc81          
+            -- 0xBB - a CC on ch11
+            -- 0x51 - cc81 in hex
+            -- 0x00 - value
+            local midi_msg = { 0xBA, 0x51, 0x00 };
+            midi_out:send(midi_msg);
+          end
+
         end
         
       end
     end
   end
+
 end
 
 

@@ -5,6 +5,6 @@
   <sections>2</sections>
   <length>8</length>
   <show_debug_prints>false</show_debug_prints>
-  <spacing>2</spacing>
+  <spacing>4</spacing>
   <note_range_min>48</note_range_min>
 </TangramPreferences>
