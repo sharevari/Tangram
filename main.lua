@@ -387,12 +387,22 @@ function on_idle()
           end
           
           if (midi_out ~= nil) then
-            -- ch11 cc81          
-            -- 0xBB - a CC on ch11
+            -- ch11 cc81-cc104          
+            -- 0xBA - a CC on ch11
             -- 0x51 - cc81 in hex
             -- 0x00 - value
-            local midi_msg = { 0xBA, 0x51, 0x00 };
-            midi_out:send(midi_msg);
+
+            for i = 1, 32 do
+              local midi_on_msg = { 0xBA, 0x50 + played_knob, 0x00 };
+              midi_out:send(midi_on_msg);
+  
+              midi_on_msg = { 0xBA, 0x50 + played_knob, 0x7F };
+              midi_out:send(midi_on_msg);
+            end
+            
+            local midi_off_msg = { 0xBA, 0x50 + played_knob, knobs[played_knob].value };
+            midi_out:send(midi_off_msg);
+
           end
 
         end
