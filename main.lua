@@ -2,99 +2,31 @@
 com.renoise.Tangram.xrnx/main.lua
 ============================================================================]]--
 
-
 --------------------------------------------------------------------------------
--- menu entries
---------------------------------------------------------------------------------
-
-renoise.tool():add_menu_entry({
-  name = "Main Menu:Tools:Tangram",
-  invoke = function() show_gui() end 
-})
-
-
---------------------------------------------------------------------------------
--- preferences
---------------------------------------------------------------------------------
-
-local options = renoise.Document.create("TangramPreferences") {
-  show_debug_prints = false,
-  sections = 1,
-  length = 8,
-  spacing = 1,
-  note_range_min = 48,
-  note_range_max = 60,
-  midi_in_channel = 0,
-}
-
--- register this document as the main preferences for the tool:
-renoise.tool().preferences = options
-
-
---------------------------------------------------------------------------------
--- midi mappings
+-- Constants
 --------------------------------------------------------------------------------
 
 local MAX_STEPS = 32
 local MAX_SPACING = 32
 
-for step = 1, MAX_STEPS do
-  renoise.tool():add_midi_mapping ({
-    name = ("Tangram:Rotary Knobs:Knob %02d"):format(step),
-    invoke = function(message) on_midi_knob_turned(step, message) end 
-  })
-end
-
-for transpose = -24, -1 do
-  renoise.tool():add_midi_mapping ({
-    name = ("Tangram:Transpose Keys:Transpose %03d"):format(transpose),
-    invoke = function(message) on_midi_transpose(transpose, message) end 
-  })
-end
-for transpose = 0, 24 do
-  renoise.tool():add_midi_mapping ({
-    name = ("Tangram:Transpose Keys:Transpose %02d"):format(transpose),
-    invoke = function(message) on_midi_transpose(transpose, message) end 
-  })
-end
-
-renoise.tool():add_midi_mapping ({
-  name = ("Tangram:Length:Increase"),
-  invoke = function(message) on_midi_length_inced(message) end 
-})
-renoise.tool():add_midi_mapping ({
-  name = ("Tangram:Length:Decrease"),
-  invoke = function(message) on_midi_length_deced(message) end 
-})
-
-renoise.tool():add_midi_mapping ({
-  name = ("Tangram:Spacing:Increase"),
-  invoke = function(message) on_midi_spacing_inced(message) end 
-})
-renoise.tool():add_midi_mapping ({
-  name = ("Tangram:Spacing:Decrease"),
-  invoke = function(message) on_midi_spacing_deced(message) end 
-})
-
-
---------------------------------------------------------------------------------
--- notifications
---------------------------------------------------------------------------------
-
--- Invoked each time a new document (song) was created or loaded.
-renoise.tool().app_new_document_observable:add_notifier(function()
-  on_new_document();
-end)
-
-
---------------------------------------------------------------------------------
--- helper functions
---------------------------------------------------------------------------------
-
 local NOTE_NAMES = {
   "C-", "C#", "D-", "D#", "E-", "F-", "F#", "G-", "G#", "A-", "A#", "B-"
 }
 
+
+--------------------------------------------------------------------------------
+-- Global variables
+--------------------------------------------------------------------------------
+
+local vb;
+local knobs = {};
+local last_played_line;
+local midi_out = nil;
+local options;
+
+
+--------------------------------------------------------------------------------
+-- Utility functions
 --------------------------------------------------------------------------------
 
 function number_to_note(number)
@@ -122,6 +54,8 @@ function note_to_number(note)
 end
 
 
+--------------------------------------------------------------------------------
+-- MIDI functions
 --------------------------------------------------------------------------------
 
 function bcr_midi_out_port()
@@ -248,17 +182,281 @@ end
 
 
 --------------------------------------------------------------------------------
--- main tool
+-- Notifiers, options
 --------------------------------------------------------------------------------
 
-local vb;
-local knobs = {};
-local last_played_line;
-local midi_out = nil;
+function on_num_sections_changed()
+
+  if (options.num_sections.value == 1) then
+    options.sequence_length.value = math.min(MAX_STEPS, options.sequence_length.value)
+    vb.views.length.max = MAX_STEPS
+  elseif (options.num_sections.value == 2) then
+    options.sequence_length.value = math.min(MAX_STEPS / 2, options.sequence_length.value)
+    vb.views.length.max = MAX_STEPS / 2
+  elseif (options.num_sections.value == 3 or options.num_sections.value == 4) then
+    options.sequence_length.value = math.min(MAX_STEPS / 4, options.sequence_length.value)
+    vb.views.length.max = MAX_STEPS / 4
+  end
+
+end
+
 
 --------------------------------------------------------------------------------
 
-function show_gui()
+function on_sequence_length_changed()
+
+  for i = 1, options.sequence_length.value do
+    --knobs[i].active = true;
+    knobs[i].visible = true;
+  end
+  for i = options.sequence_length.value + 1, MAX_STEPS do
+    --knobs[i].active = false;
+    knobs[i].visible = false;
+  end
+
+  rebuild_pattern_data();
+
+end
+
+
+--------------------------------------------------------------------------------
+
+function on_step_spacing_changed()
+  rebuild_pattern_data();
+end
+
+
+--------------------------------------------------------------------------------
+
+function on_note_range_changed()
+  rebuild_pattern_data();
+end
+
+
+
+--------------------------------------------------------------------------------
+-- Notifiers, GUI
+--------------------------------------------------------------------------------
+
+function on_gui_knob_turned(step, value)
+  write_note_from_scaled_value(step, value / 127);
+  
+  -- todo: set light on hw knob
+end
+
+
+--------------------------------------------------------------------------------
+-- Notifiers, MIDI
+--------------------------------------------------------------------------------
+
+function on_midi_knob_turned(step, message)
+
+  if (message:is_abs_value()) then
+
+    if (step <= options.sequence_length.value) then
+      write_note_from_scaled_value(step, message.int_value / 127);
+      if (knobs[1] ~= nil) then
+        knobs[step].value = message.int_value;
+      end
+    end
+   
+  elseif (message:is_rel_value()) then
+    -- todo
+  end
+
+end
+
+
+--------------------------------------------------------------------------------
+
+function on_midi_transpose(offset, message)
+
+  if (message:is_trigger()) then
+    local instr = renoise.song().selected_instrument;
+
+    for i = 1, #instr.samples do
+      instr.samples[i].transpose = offset;
+    end
+    
+    instr.plugin_properties.transpose = offset;
+
+    instr.midi_output_properties.transpose = offset;
+  end
+
+end
+
+
+--------------------------------------------------------------------------------
+
+function on_midi_length_inced(message)
+
+  print(message.int_value);
+
+  if (options.sequence_length.value < MAX_STEPS) then
+    options.sequence_length.value = options.sequence_length.value + 1;
+  end
+end
+
+
+--------------------------------------------------------------------------------
+
+function on_midi_length_deced(message)
+
+  print(message.int_value);
+
+  if (options.sequence_length.value > 1) then
+    options.sequence_length.value = options.sequence_length.value - 1;
+  end
+end
+
+
+--------------------------------------------------------------------------------
+
+function on_midi_spacing_inced(message)
+  if (options.step_spacing.value < MAX_SPACING) then
+    options.step_spacing.value = options.step_spacing.value + 1
+  end
+end
+
+
+--------------------------------------------------------------------------------
+
+function on_midi_spacing_deced(message)
+  if (options.step_spacing.value > 1) then
+    options.step_spacing.value = options.step_spacing.value - 1
+  end
+end
+
+
+--------------------------------------------------------------------------------
+-- Notifiers, Renoise
+--------------------------------------------------------------------------------
+
+function on_new_document()
+
+  renoise.tool().app_idle_observable:add_notifier(function()
+    on_idle();
+  end)
+  
+  renoise.song().transport.playing_observable:add_notifier(function()
+    on_playing_changed();
+  end)
+  
+end
+
+
+--------------------------------------------------------------------------------
+
+function on_playing_changed()
+  if (knobs[1] ~= nil) then
+    if (not renoise.song().transport.playing) then
+      for i = 1, MAX_STEPS do
+        knobs[i].active = true;
+      end
+    end
+  end
+end
+
+
+--------------------------------------------------------------------------------
+
+function on_idle()
+
+  if (renoise.song().transport.playing) then
+
+    local played_line = renoise.song().transport.playback_pos.line;
+
+    if (played_line ~= last_played_line) then
+
+      local length = options.sequence_length.value;
+      local spacing = options.step_spacing.value;
+      last_played_line = played_line;
+
+      if ((last_played_line - 1) % spacing == 0) then
+
+        local line_offset_from_start = (last_played_line - 1) % (length * spacing);
+        local played_knob = (line_offset_from_start / spacing) + 1;
+        
+        if (knobs[1] ~= nil) then
+          knobs[played_knob].active = false;
+          
+          if (played_knob > 1) then
+            knobs[played_knob - 1].active = true;
+          else
+            knobs[length].active = true;
+          end
+          
+          if (midi_out ~= nil) then
+            -- ch11 cc81          
+            -- 0xBB - a CC on ch11
+            -- 0x51 - cc81 in hex
+            -- 0x00 - value
+            local midi_msg = { 0xBA, 0x51, 0x00 };
+            midi_out:send(midi_msg);
+          end
+
+        end
+        
+      end
+    end
+  end
+
+end
+
+
+--------------------------------------------------------------------------------
+-- Document operations
+--------------------------------------------------------------------------------
+
+function rebuild_pattern_data()
+  renoise.song().selected_pattern_track:clear();
+
+  renoise.song().selected_pattern.number_of_lines =
+    options.sequence_length.value * options.step_spacing.value;
+
+  for i = 1, options.sequence_length.value do
+    write_note_from_scaled_value(i, knobs[i].value / 127);
+  end
+end
+
+
+--------------------------------------------------------------------------------
+
+function write_note_from_scaled_value(step, value)
+
+  local note_min = options.note_range_min;
+  local note_max = options.note_range_max;
+  local note_range = note_max - note_min + 1;
+
+  local note = math.floor((note_min - 1) + (value * note_range) + 0.5)
+
+  if (note == (note_min - 1)) then
+    note = 121;
+  end
+
+  local instr = (note == 121 and 255) or renoise.song().selected_instrument_index - 1;
+
+  local line_idx = (step - 1) * options.step_spacing + 1;
+  repeat
+    local line = renoise.song().selected_pattern_track:line(line_idx);
+    local note_col = line:note_column(1);
+    
+    note_col.note_value = note;
+    note_col.instrument_value = instr;
+
+    line_idx = line_idx + (options.sequence_length * options.step_spacing);
+  until line_idx > renoise.song().selected_pattern.number_of_lines
+    
+  return note;
+
+end
+
+
+--------------------------------------------------------------------------------
+-- GUI
+--------------------------------------------------------------------------------
+
+function build_gui()
 
   local midi_out_port = bcr_midi_out_port();
   if (midi_out_port ~= nil) then
@@ -327,7 +525,7 @@ function show_gui()
       min = 1,
       max = 32,
       id = "length",
-      bind = options.length
+      bind = options.sequence_length
     }
   }
 
@@ -351,7 +549,7 @@ function show_gui()
     vb:valuebox {
       min = 1,
       max = MAX_SPACING,
-      bind = options.spacing
+      bind = options.step_spacing
     }
   }
 
@@ -406,8 +604,8 @@ function show_gui()
   
   dialog = renoise.app():show_custom_dialog("Tangram", dialog_content);
 
-  -- initialise state
-  on_length_changed();
+  -- Initialise state
+  on_sequence_length_changed();
   
   last_played_line = 1;
   
@@ -417,65 +615,8 @@ end
 --------------------------------------------------------------------------------
 
 _AUTO_RELOAD_DEBUG = function()
-  show_gui()
+  build_gui()
 end
-
-
---------------------------------------------------------------------------------
-
-function on_sections_changed()
-  if (options.sections.value == 1) then
-    options.length.value = math.min(MAX_STEPS, options.length.value)
-    vb.views.length.max = MAX_STEPS
-  elseif (options.sections.value == 2) then
-    options.length.value = math.min(MAX_STEPS / 2, options.length.value)
-    vb.views.length.max = MAX_STEPS / 2
-  elseif (options.sections.value == 3 or options.sections.value == 4) then
-    options.length.value = math.min(MAX_STEPS / 4, options.length.value)
-    vb.views.length.max = MAX_STEPS / 4
-  end
-end
-
-
---------------------------------------------------------------------------------
-
-function on_length_changed()
-
-  for i = 1, options.length.value do
-    --knobs[i].active = true;
-    knobs[i].visible = true;
-  end
-  for i = options.length.value + 1, MAX_STEPS do
-    --knobs[i].active = false;
-    knobs[i].visible = false;
-  end
-
-  rebuild_pattern_data();
-
-end
-
-
---------------------------------------------------------------------------------
-
-function on_spacing_changed()
-  rebuild_pattern_data();
-end
-
-
---------------------------------------------------------------------------------
-
-function on_note_range_changed()
-  rebuild_pattern_data();
-end
-
-
---------------------------------------------------------------------------------
-
-options.sections:add_notifier(on_sections_changed);
-options.length:add_notifier(on_length_changed);
-options.spacing:add_notifier(on_spacing_changed);
-options.note_range_min:add_notifier(on_note_range_changed);
-options.note_range_max:add_notifier(on_note_range_changed);
 
 
 --------------------------------------------------------------------------------
@@ -498,119 +639,83 @@ end
 
 
 --------------------------------------------------------------------------------
-
-function rebuild_pattern_data()
-  renoise.song().selected_pattern_track:clear();
-
-  renoise.song().selected_pattern.number_of_lines =
-    options.length.value * options.spacing.value;
-
-  for i = 1, options.length.value do
-    write_note_from_scaled_value(i, knobs[i].value / 127);
-  end
-end
-
-
+-- main 
 --------------------------------------------------------------------------------
 
-function on_gui_knob_turned(step, value)
-  write_note_from_scaled_value(step, value / 127);
+function main()
+
+  -- Tools menu entry
+  renoise.tool():add_menu_entry({
+    name = "Main Menu:Tools:Tangram",
+    invoke = function() build_gui() end 
+  })
   
-  -- todo: set light on hw knob
-end
-
-
---------------------------------------------------------------------------------
-
-function on_midi_knob_turned(step, message)
-
-  if (message:is_abs_value()) then
-
-    if (step <= options.length.value) then
-      write_note_from_scaled_value(step, message.int_value / 127);
-      if (knobs[1] ~= nil) then
-        knobs[step].value = message.int_value;
-      end
-    end
-   
-  elseif (message:is_rel_value()) then
-    -- todo
-  end
-
-end
-
-
---------------------------------------------------------------------------------
-
-function on_midi_transpose(offset, message)
-
-  if (message:is_trigger()) then
-    local instr = renoise.song().selected_instrument;
-
-    for i = 1, #instr.samples do
-      instr.samples[i].transpose = offset;
-    end
-    
-    instr.plugin_properties.transpose = offset;
-
-    instr.midi_output_properties.transpose = offset;
-  end
-
-end
-
-
---------------------------------------------------------------------------------
-
-function on_midi_length_inced(message)
-
-  print(message.int_value);
-
-  if (options.length.value < MAX_STEPS) then
-    options.length.value = options.length.value + 1;
-  end
-end
-
-
---------------------------------------------------------------------------------
-
-function on_midi_length_deced(message)
-
-  print(message.int_value);
-
-  if (options.length.value > 1) then
-    options.length.value = options.length.value - 1;
-  end
-end
-
-
---------------------------------------------------------------------------------
-
-function on_midi_spacing_inced(message)
-  if (options.spacing.value < MAX_SPACING) then
-    options.spacing.value = options.spacing.value + 1
-  end
-end
-
-
---------------------------------------------------------------------------------
-
-function on_midi_spacing_deced(message)
-  if (options.spacing.value > 1) then
-    options.spacing.value = options.spacing.value - 1
-  end
-end
-
-
---------------------------------------------------------------------------------
-
-function on_new_document()
-
-  renoise.tool().app_idle_observable:add_notifier(function()
-    on_idle();
-  end)
   
-  renoise.song().transport.playing_observable:add_notifier(function()
-    on_playing_changed();
+  -- Create options
+  options = renoise.Document.create("TangramPreferences") {
+    show_debug_prints = false,
+    num_sections = 1,
+    sequence_length = 8,
+    step_spacing = 1,
+    note_range_min = 48,
+    note_range_max = 60,
+    midi_in_channel = 0,
+  }
+  
+  -- Register this document as the main preferences for the tool
+  renoise.tool().preferences = options
+
+  -- Attach notifiers to our options
+  options.num_sections:add_notifier(on_num_sections_changed);
+  options.sequence_length:add_notifier(on_sequence_length_changed);
+  options.step_spacing:add_notifier(on_step_spacing_changed);
+  options.note_range_min:add_notifier(on_note_range_changed);
+  options.note_range_max:add_notifier(on_note_range_changed);
+  
+  
+  -- Register MIDI mappings
+  for step = 1, MAX_STEPS do
+    renoise.tool():add_midi_mapping ({
+      name = ("Tangram:Rotary Knobs:Knob %02d"):format(step),
+      invoke = function(message) on_midi_knob_turned(step, message) end 
+    })
+  end
+  
+  for transpose = -24, -1 do
+    renoise.tool():add_midi_mapping ({
+      name = ("Tangram:Transpose Keys:Transpose %03d"):format(transpose),
+      invoke = function(message) on_midi_transpose(transpose, message) end 
+    })
+  end
+  for transpose = 0, 24 do
+    renoise.tool():add_midi_mapping ({
+      name = ("Tangram:Transpose Keys:Transpose %02d"):format(transpose),
+      invoke = function(message) on_midi_transpose(transpose, message) end 
+    })
+  end
+  
+  renoise.tool():add_midi_mapping ({
+    name = ("Tangram:Length:Increase"),
+    invoke = function(message) on_midi_length_inced(message) end 
+  })
+  renoise.tool():add_midi_mapping ({
+    name = ("Tangram:Length:Decrease"),
+    invoke = function(message) on_midi_length_deced(message) end 
+  })
+  
+  renoise.tool():add_midi_mapping ({
+    name = ("Tangram:Spacing:Increase"),
+    invoke = function(message) on_midi_spacing_inced(message) end 
+  })
+  renoise.tool():add_midi_mapping ({
+    name = ("Tangram:Spacing:Decrease"),
+    invoke = function(message) on_midi_spacing_deced(message) end 
+  })
+  
+  
+  -- Attach to notifications
+  renoise.tool().app_new_document_observable:add_notifier(function()
+    on_new_document();
   end)
   
 end
@@ -618,90 +723,5 @@ end
 
 --------------------------------------------------------------------------------
 
-function on_playing_changed()
-  if (knobs[1] ~= nil) then
-    if (not renoise.song().transport.playing) then
-      for i = 1, MAX_STEPS do
-        knobs[i].active = true;
-      end
-    end
-  end
-end
+main();
 
-
---------------------------------------------------------------------------------
-
-function on_idle()
-
-  if (renoise.song().transport.playing) then
-
-    local played_line = renoise.song().transport.playback_pos.line;
-
-    if (played_line ~= last_played_line) then
-
-      local length = options.length.value;
-      local spacing = options.spacing.value;
-      last_played_line = played_line;
-
-      if ((last_played_line - 1) % spacing == 0) then
-
-        local line_offset_from_start = (last_played_line - 1) % (length * spacing);
-        local played_knob = (line_offset_from_start / spacing) + 1;
-        
-        if (knobs[1] ~= nil) then
-          knobs[played_knob].active = false;
-          
-          if (played_knob > 1) then
-            knobs[played_knob - 1].active = true;
-          else
-            knobs[length].active = true;
-          end
-          
-          if (midi_out ~= nil) then
-            -- ch11 cc81          
-            -- 0xBB - a CC on ch11
-            -- 0x51 - cc81 in hex
-            -- 0x00 - value
-            local midi_msg = { 0xBA, 0x51, 0x00 };
-            midi_out:send(midi_msg);
-          end
-
-        end
-        
-      end
-    end
-  end
-
-end
-
-
---------------------------------------------------------------------------------
-
-function write_note_from_scaled_value(step, value)
-
-  local note_min = options.note_range_min;
-  local note_max = options.note_range_max;
-  local note_range = note_max - note_min + 1;
-
-  local note = math.floor((note_min - 1) + (value * note_range) + 0.5)
-
-  if (note == (note_min - 1)) then
-    note = 121;
-  end
-
-  local instr = (note == 121 and 255) or renoise.song().selected_instrument_index - 1;
-
-  local line_idx = (step - 1) * options.spacing + 1;
-  repeat
-    local line = renoise.song().selected_pattern_track:line(line_idx);
-    local note_col = line:note_column(1);
-    
-    note_col.note_value = note;
-    note_col.instrument_value = instr;
-
-    line_idx = line_idx + (options.length * options.spacing);
-  until line_idx > renoise.song().selected_pattern.number_of_lines
-    
-  return note;
-
-end
